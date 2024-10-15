@@ -24,6 +24,7 @@ import traceback
 from typing import (
     Any,
     Callable,
+    Protocol,
     cast,
     ClassVar,
     Dict,
@@ -38,6 +39,7 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    Generic
 )
 import warnings
 
@@ -48,8 +50,6 @@ from falcon import routing
 from falcon._typing import AsgiResponderCallable
 from falcon._typing import AsgiResponderWsCallable
 from falcon._typing import AsgiSinkCallable
-from falcon._typing import ErrorHandler
-from falcon._typing import ErrorSerializer
 from falcon._typing import FindMethod
 from falcon._typing import ProcessResponseMethod
 from falcon._typing import ResponderCallable
@@ -57,6 +57,9 @@ from falcon._typing import SinkCallable
 from falcon._typing import SinkPrefix
 from falcon._typing import StartResponse
 from falcon._typing import WSGIEnvironment
+from falcon._typing import _REQ
+from falcon._typing import _RESP
+from falcon._typing import _BE
 from falcon.errors import CompatibilityError
 from falcon.errors import HTTPBadRequest
 from falcon.errors import HTTPInternalServerError
@@ -90,10 +93,15 @@ _TYPELESS_STATUS_CODES = frozenset(
         status.HTTP_304,
     ]
 )
-_BE = TypeVar('_BE', bound=BaseException)
+
+class ErrorHandler(Generic[_REQ, _RESP, _BE], Protocol):
+    def __call__(self, req: _REQ, resp: _RESP, error: _BE, params: Dict[str, Any]) -> None: ...
+
+class ErrorSerializer(Generic[_REQ, _RESP], Protocol):
+    def __call__(self, req:_REQ, resp:_RESP, exception: HTTPError) -> None: ...
 
 
-class App:
+class App(Generic[_REQ, _RESP]):
     '''The main entry point into a Falcon-based WSGI app.
 
     Each App instance provides a callable
@@ -261,16 +269,16 @@ class App:
     )
 
     _cors_enable: bool
-    _error_handlers: Dict[Type[BaseException], ErrorHandler]
+    _error_handlers: Dict[Type[BaseException], ErrorHandler[_REQ,_RESP, BaseException]]
     _independent_middleware: bool
     _middleware: helpers.PreparedMiddlewareResult
-    _request_type: Type[Request]
-    _response_type: Type[Response]
+    _request_type: Type[_REQ]
+    _response_type: Type[_RESP]
     _router_search: FindMethod
     # NOTE(caselit): this should actually be a protocol of the methods required
     # by a router, hardcoded to CompiledRouter for convenience for now.
     _router: routing.CompiledRouter
-    _serialize_error: ErrorSerializer
+    _serialize_error: ErrorSerializer[_REQ, _RESP]
     _sink_and_static_routes: Tuple[
         Tuple[
             Union[Pattern[str], routing.StaticRoute],
@@ -303,8 +311,8 @@ class App:
     def __init__(
         self,
         media_type: str = constants.DEFAULT_MEDIA_TYPE,
-        request_type: Optional[Type[Request]] = None,
-        response_type: Optional[Type[Response]] = None,
+        request_type: Optional[Type[_REQ]] = None,
+        response_type: Optional[Type[_RESP]] = None,
         middleware: Union[object, Iterable[object]] = None,
         router: Optional[routing.CompiledRouter] = None,
         independent_middleware: bool = True,
@@ -342,8 +350,8 @@ class App:
         self._router = router or routing.DefaultRouter()
         self._router_search = self._router.find
 
-        self._request_type = request_type or Request
-        self._response_type = response_type or Response
+        self._request_type = cast(type[_REQ], request_type or Request)
+        self._response_type = cast(type[_RESP], response_type or Response)
 
         self._error_handlers = {}
         self._serialize_error = helpers.default_serialize_error
@@ -813,24 +821,11 @@ class App:
         self._sinks.insert(0, (prefix, sink, True))
         self._update_sink_and_static_routes()
 
-    @overload
+
     def add_error_handler(
         self,
-        exception: Type[_BE],
-        handler: Callable[[Request, Response, _BE, Dict[str, Any]], None],
-    ) -> None: ...
-
-    @overload
-    def add_error_handler(
-        self,
-        exception: Union[Type[BaseException], Iterable[Type[BaseException]]],
-        handler: Optional[ErrorHandler] = None,
-    ) -> None: ...
-
-    def add_error_handler(  # type: ignore[misc]
-        self,
-        exception: Union[Type[BaseException], Iterable[Type[BaseException]]],
-        handler: Optional[ErrorHandler] = None,
+        exception: Union[Type[_BE], Iterable[Type[_BE]]],
+        handler: Optional[ErrorHandler[_REQ, _RESP, _BE]] = None,
     ) -> None:
         """Register a handler for one or more exception types.
 
@@ -910,12 +905,12 @@ class App:
 
         """
 
-        def wrap_old_handler(old_handler: Callable[..., Any]) -> ErrorHandler:
+        def wrap_old_handler(old_handler: Callable[..., Any]) -> ErrorHandler[_REQ, _RESP, BaseException]:
             @wraps(old_handler)
             def handler(
-                req: Request, resp: Response, ex: BaseException, params: Dict[str, Any]
+                req: _REQ, resp: Response, error: BaseException, params: Dict[str, Any]
             ) -> None:
-                old_handler(ex, req, resp, params)
+                old_handler(error, req, resp, params)
 
             return handler
 
@@ -957,7 +952,7 @@ class App:
 
             self._error_handlers[exc] = handler
 
-    def set_error_serializer(self, serializer: ErrorSerializer) -> None:
+    def set_error_serializer(self, serializer: ErrorSerializer[_REQ, _RESP]) -> None:
         """Override the default serializer for instances of :class:`~.HTTPError`.
 
         When a responder raises an instance of :class:`~.HTTPError`,
@@ -1114,7 +1109,7 @@ class App:
         resp.text = http_status.text
 
     def _compose_error_response(
-        self, req: Request, resp: Response, error: HTTPError
+        self, req: _REQ, resp: _RESP, error: HTTPError
     ) -> None:
         """Compose a response for the given HTTPError instance."""
 
@@ -1125,23 +1120,25 @@ class App:
 
         self._serialize_error(req, resp, error)
 
+    # the third argument really should be named `status`, but it's called `error`
+    # to be compatible with error_handler protocol
     def _http_status_handler(
-        self, req: Request, resp: Response, status: HTTPStatus, params: Dict[str, Any]
+        self, req: Request, resp: Response, error: HTTPStatus, params: Dict[str, Any]
     ) -> None:
-        self._compose_status_response(req, resp, status)
+        self._compose_status_response(req, resp, error)
 
     def _http_error_handler(
-        self, req: Request, resp: Response, error: HTTPError, params: Dict[str, Any]
+        self, req: _REQ, resp: _RESP, error: HTTPError, params: Dict[str, Any]
     ) -> None:
         self._compose_error_response(req, resp, error)
 
     def _python_error_handler(
-        self, req: Request, resp: Response, error: BaseException, params: Dict[str, Any]
+        self, req: _REQ, resp: _RESP, error: BaseException, params: Dict[str, Any]
     ) -> None:
         req.log_error(traceback.format_exc())
         self._compose_error_response(req, resp, HTTPInternalServerError())
 
-    def _find_error_handler(self, ex: BaseException) -> Optional[ErrorHandler]:
+    def _find_error_handler(self, ex: BaseException) -> Optional[ErrorHandler[_REQ, _RESP, BaseException]]:
         # NOTE(csojinb): The `__mro__` class attribute returns the method
         # resolution order tuple, i.e. the complete linear inheritance chain
         # ``(type(ex), ..., object)``. For a valid exception class, the last
@@ -1159,7 +1156,7 @@ class App:
         return None
 
     def _handle_exception(
-        self, req: Request, resp: Response, ex: BaseException, params: Dict[str, Any]
+        self, req: _REQ, resp: _RESP, ex: BaseException, params: Dict[str, Any]
     ) -> bool:
         """Handle an exception raised from mw or a responder.
 
@@ -1283,3 +1280,5 @@ class API(App):
     )
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+
+SimpleApp = App[Request, Response]

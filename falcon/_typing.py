@@ -68,6 +68,13 @@ UnsetOr = Union[Literal[_Unset.UNSET], _T]
 
 Link = Dict[str, str]
 CookieArg = Mapping[str, Union[str, Cookie]]
+
+_BE = TypeVar('_BE', bound=BaseException, contravariant=True)
+_REQ = TypeVar('_REQ', bound='Request', contravariant=True)
+_A_REQ = TypeVar('_A_REQ', bound='AsgiRequest', contravariant=True)
+_RESP = TypeVar('_RESP', bound='Response', contravariant=True)
+_A_RESP = TypeVar('_A_RESP', bound='AsgiResponse', contravariant=True)
+
 # Error handlers
 ErrorHandler = Callable[['Request', 'Response', BaseException, Dict[str, Any]], None]
 

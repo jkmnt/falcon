@@ -330,7 +330,7 @@ __all__ = (
 # NOTE(kgriffs,vytas): Hoist classes and functions into the falcon namespace.
 #   Please explicitly list ALL exports.
 from falcon.app import API
-from falcon.app import App
+from falcon.app import App, SimpleApp
 from falcon.constants import ASGI_SUPPORTED  # NOQA: F401
 from falcon.constants import COMBINED_METHODS
 from falcon.constants import DEFAULT_MEDIA_TYPE
